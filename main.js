@@ -16,15 +16,16 @@ const glados = async () => {
       method: 'GET',
       headers,
     }).then((r) => r.json())
+    const leftDays = status?.data?.leftDays ?? 'N/A'
     return [
       'Checkin OK',
       `${checkin.message}`,
-      `Left Days ${Number(status.data.leftDays)}`,
+      `Left Days ${Number(leftDays)}`,
     ]
   } catch (error) {
     return [
       'Checkin Error',
-      `${error}`,
+      `${error.message || error}`,
       `<${process.env.GITHUB_SERVER_URL}/${process.env.GITHUB_REPOSITORY}>`,
     ]
   }

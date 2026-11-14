@@ -1,50 +1,72 @@
 name: run
 
-# 签到主战场已迁到用户 Mac 本地（真实 Chrome + 直连 + Turnstile token）。
-# 云端机房 IP 无法生成 Turnstile token，直接跑签到必然 code:5，
-# 因此云端改为「兜底巡检」：只核对今天有没有签到成功。
-#   - 已签到 → 静默绿灯，不推送（消灭每日噪音）
-#   - 未签到 / Cookie 失效 → 推送提醒，当天还来得及手动补
-# monitor.js 用 GET /api/user/points 的 history 做硬判断，不依赖页面文字。
+# 角色：线上为主通道，每天定时常开；用户 Mac 本地的真实 Chrome 方案作为保底。
+#
+# 班次（北京时间）：
+#   08:00 云端签到（UTC 00:00）—— 先由线上尝试签到，失败静默不报警
+#   08:45 本地保底签到（Mac 真实 Chrome，云端过不了 Turnstile 时兜住）
+#   21:45 本地补跑（脚本幂等，已签到自动跳过）
+#   22:00 云端巡检（UTC 14:00）—— 核对当天是否签到成功，漏签才推送提醒
+#
+# 客观限制：GLaDOS 2026-11 起启用 Cloudflare Turnstile，云端机房 IP 目前
+# 生成不了验证 token，签到会返回 code:5。因此早班签到步骤设为静默
+# （NOTIFY 置空 + continue-on-error），不会天天推假报警、也不会让 Actions 变红。
+# 一旦 GLaDOS 放宽策略或配置了 TURNSTILE_TOKEN，云端立刻能自己签上。
+#
+# monitor.js 只认积分流水里的硬证据：detail == 今天(Asia/Shanghai) 且
+# business == system:checkin，不依赖页面文字，也不关心是哪一端签的。
 
 on:
   workflow_dispatch:
     inputs:
       mode:
-        description: 'monitor=兜底巡检(默认)；main=云端直连签到诊断'
+        description: 'auto=云端签到+巡检(默认)；checkin=只跑云端签到；monitor=只巡检'
         required: false
-        default: 'monitor'
+        default: 'auto'
+        type: choice
+        options:
+          - auto
+          - checkin
+          - monitor
   schedule:
-    # UTC 14:00 = 北京 22:00，本地 8:45 / 21:45 两班都跑完之后再核对
-    - cron: 0 14 * * *
+    # UTC 00:00 = 北京 08:00：线上先跑签到
+    - cron: '0 0 * * *'
+    # UTC 14:00 = 北京 22:00：本地两班之后做兜底复核
+    - cron: '0 14 * * *'
+
+permissions:
+  contents: read
 
 jobs:
-  monitor:
-    if: github.event_name == 'schedule' || inputs.mode == 'monitor' || inputs.mode == ''
+  glados:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: 20
       - run: npm ci
-      - run: npm run monitor
-        env:
-          GLADOS: ${{ secrets.GLADOS }}
-          NOTIFY: ${{ secrets.NOTIFY }}
 
-  # 手动诊断入口：保留原签到逻辑，验证云端当前是否仍被 Turnstile 拦截
-  diagnose:
-    if: github.event_name == 'workflow_dispatch' && inputs.mode == 'main'
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 20
-      - run: npm ci
-      - run: npm run main
+      # 主通道：线上尝试签到。Turnstile 拦截时静默留日志，不推送、不标红。
+      - name: 云端签到（主通道）
+        if: >-
+          ${{ (github.event_name == 'schedule' && github.event.schedule == '0 0 * * *') ||
+              (github.event_name == 'workflow_dispatch' && (inputs.mode == 'auto' || inputs.mode == 'checkin' || inputs.mode == '')) }}
+        continue-on-error: true
+        run: npm run main
+        env:
+          GLADOS: ${{ secrets.GLADOS }}
+          TURNSTILE_TOKEN: ${{ secrets.TURNSTILE_TOKEN }}
+          # 覆盖 Secret：云端签到失败不推假报警，只有巡检发现真漏签才推
+          NOTIFY: ''
+
+      # 复核：已签到静默绿灯；真漏签 / Cookie 失效才推送提醒
+      - name: 兜底巡检
+        if: >-
+          ${{ (github.event_name == 'schedule' && github.event.schedule == '0 14 * * *') ||
+              (github.event_name == 'workflow_dispatch' && (inputs.mode == 'auto' || inputs.mode == 'monitor' || inputs.mode == '')) }}
+        run: npm run monitor
         env:
           GLADOS: ${{ secrets.GLADOS }}
           NOTIFY: ${{ secrets.NOTIFY }}
-          TURNSTILE_TOKEN: ${{ secrets.TURNSTILE_TOKEN }}

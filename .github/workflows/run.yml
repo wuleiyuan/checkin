@@ -1,10 +1,14 @@
 name: run
 
+# 2026-11-14：GLaDOS 签到启用 Cloudflare Turnstile 人机验证，
+# GitHub Actions 机房 IP 无法生成 token，云端定时签到必然返回 code:5 并推送假报警。
+# 签到已迁到用户 Mac 本地（真实 Chrome + 直连 + 注入 Cookie）。
+# 这里只保留手动触发，作为链路诊断入口；如需恢复定时，取消下面注释即可。
 on:
   workflow_dispatch:
   push:
-  schedule:
-    - cron: 10 16 * * *
+  # schedule:
+  #   - cron: 10 16 * * *
 
 jobs:
   run:

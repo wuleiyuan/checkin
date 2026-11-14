@@ -16,7 +16,8 @@ name: run
 #   - 加 --host-resolver-rules 强制 IPv4 后 DNS 全通，但 CF 的 pat 端点返回 401，
 #     Turnstile 组件不渲染、tokenLen 恒为 0
 #   - 结论：CF 拒绝数据中心 IP，不是 DNS/浏览器标记/代码问题，纯托管 runner 修不了
-# 因此早班签到步骤设为静默（NOTIFY 置空 + continue-on-error），不会天天推假报警。
+# 因此早班用 EXPECT_TURNSTILE_BLOCK=1 把 code:5 记为「跳过」并保持绿灯，
+# NOTIFY 置空不推假报警；其它真实故障（Cookie 失效 / 网络异常）仍会让 Actions 变红。
 # 真签到由本机直连真实 Chrome 完成；若要线上自主签到需改用 self-hosted runner。
 #
 # monitor.js 只认积分流水里的硬证据：detail == 今天(Asia/Shanghai) 且
@@ -54,18 +55,22 @@ jobs:
           node-version: 20
       - run: npm ci
 
-      # 主通道：线上尝试签到。Turnstile 拦截时静默留日志，不推送、不标红。
+      # 主通道：线上尝试签到。预期内的 CF 拦截记为跳过并绿灯；
+      # 其它非预期故障照常让 Actions 变红，不掩盖问题。
       - name: 云端签到（主通道）
         if: >-
           ${{ (github.event_name == 'schedule' && github.event.schedule == '0 0 * * *') ||
               (github.event_name == 'workflow_dispatch' && (inputs.mode == 'auto' || inputs.mode == 'checkin' || inputs.mode == '')) }}
-        continue-on-error: true
         run: npm run main
         env:
           GLADOS: ${{ secrets.GLADOS }}
           TURNSTILE_TOKEN: ${{ secrets.TURNSTILE_TOKEN }}
           # 覆盖 Secret：云端签到失败不推假报警，只有巡检发现真漏签才推
           NOTIFY: ''
+          # 仅自动定时启用：机房 IP 被 CF 拦截是预期内策略限制，
+          # 记为「跳过」并保持绿灯，不再留下吓人的失败标记。
+          # 手动 workflow_dispatch 不设此变量，仍能看到真实 code:5 诊断结果。
+          EXPECT_TURNSTILE_BLOCK: ${{ github.event_name == 'schedule' && '1' || '' }}
 
       # 复核：已签到静默绿灯；真漏签 / Cookie 失效才推送提醒
       - name: 兜底巡检

@@ -13,6 +13,13 @@
  *   5   - Cloudflare Turnstile 人机验证未通过（reason: turnstile，retryable: true）
  *   其它 - 未知，一律失败并保留详情
  *
+ * 云端静默模式（环境变量 EXPECT_TURNSTILE_BLOCK=1）：
+ *   GitHub 机房 IP 必然被 CF 拦截，这是已知策略限制，不是故障。
+ *   该模式下 code:5 记为「跳过」并让 Actions 保持绿灯，日志仍保留完整原始返回；
+ *   真签到由本机保底完成，22:00 的 monitor.js 独立核对当天是否签到，
+ *   真漏签 / Cookie 失效依旧会推提醒，因此不会掩盖问题。
+ *   仅自动定时启用；手动诊断（workflow_dispatch）不设此变量，仍能看到真实失败。
+ *
  * Cookie 要求（2026-10-30 实测）：
  *   必须包含全部四枚：koa:sess、koa:sess.sig、gld:sess、gld:sess.sig。
  *
@@ -163,9 +170,17 @@ const glados = async () => {
       ok = true
       title = '今日已签到（重复执行）'
     } else if (code === 5 || checkin?.reason === 'turnstile') {
-      title = '签到失败 ❌ 需要 Cloudflare 人机验证'
-      hint =
-        'GLaDOS 已启用 Turnstile，CI 纯 API 无法生成验证 token。请手动打开 https://glados.rocks/console/checkin 点击 Checkin（一天一次，10 秒）'
+      if (process.env.EXPECT_TURNSTILE_BLOCK === '1') {
+        // 预期内的策略拦截：不算故障，Actions 保持绿灯；巡检会独立复核是否真漏签
+        ok = true
+        title = '云端签到跳过 ⏭️ Cloudflare 拦截（预期内，本机保底）'
+        hint =
+          'GitHub 机房 IP 无法生成 Turnstile token，属已知策略限制。本机 08:45 完成签到，22:00 巡检负责核对；真漏签仍会推送提醒。手动诊断不设 EXPECT_TURNSTILE_BLOCK 即可看到真实 code:5。'
+      } else {
+        title = '签到失败 ❌ 需要 Cloudflare 人机验证'
+        hint =
+          'GLaDOS 已启用 Turnstile，CI 纯 API 无法生成验证 token。请手动打开 https://glados.rocks/console/checkin 点击 Checkin（一天一次，10 秒）'
+      }
     } else if (code === -2 || /没有权限|未登录|失效|过期|token|login/i.test(message)) {
       title = '签到失败 ❌ Cookie 已失效'
       hint =

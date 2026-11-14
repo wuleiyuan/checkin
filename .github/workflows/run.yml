@@ -1,17 +1,41 @@
 name: run
 
-# 2026-11-14：GLaDOS 签到启用 Cloudflare Turnstile 人机验证，
-# GitHub Actions 机房 IP 无法生成 token，云端定时签到必然返回 code:5 并推送假报警。
-# 签到已迁到用户 Mac 本地（真实 Chrome + 直连 + 注入 Cookie）。
-# 这里只保留手动触发，作为链路诊断入口；如需恢复定时，取消下面注释即可。
+# 签到主战场已迁到用户 Mac 本地（真实 Chrome + 直连 + Turnstile token）。
+# 云端机房 IP 无法生成 Turnstile token，直接跑签到必然 code:5，
+# 因此云端改为「兜底巡检」：只核对今天有没有签到成功。
+#   - 已签到 → 静默绿灯，不推送（消灭每日噪音）
+#   - 未签到 / Cookie 失效 → 推送提醒，当天还来得及手动补
+# monitor.js 用 GET /api/user/points 的 history 做硬判断，不依赖页面文字。
+
 on:
   workflow_dispatch:
-  push:
-  # schedule:
-  #   - cron: 10 16 * * *
+    inputs:
+      mode:
+        description: 'monitor=兜底巡检(默认)；main=云端直连签到诊断'
+        required: false
+        default: 'monitor'
+  schedule:
+    # UTC 14:00 = 北京 22:00，本地 8:45 / 21:45 两班都跑完之后再核对
+    - cron: 0 14 * * *
 
 jobs:
-  run:
+  monitor:
+    if: github.event_name == 'schedule' || inputs.mode == 'monitor' || inputs.mode == ''
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm ci
+      - run: npm run monitor
+        env:
+          GLADOS: ${{ secrets.GLADOS }}
+          NOTIFY: ${{ secrets.NOTIFY }}
+
+  # 手动诊断入口：保留原签到逻辑，验证云端当前是否仍被 Turnstile 拦截
+  diagnose:
+    if: github.event_name == 'workflow_dispatch' && inputs.mode == 'main'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -23,3 +47,4 @@ jobs:
         env:
           GLADOS: ${{ secrets.GLADOS }}
           NOTIFY: ${{ secrets.NOTIFY }}
+          TURNSTILE_TOKEN: ${{ secrets.TURNSTILE_TOKEN }}

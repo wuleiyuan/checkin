@@ -8,10 +8,16 @@ name: run
 #   21:45 本地补跑（脚本幂等，已签到自动跳过）
 #   22:00 云端巡检（UTC 14:00）—— 核对当天是否签到成功，漏签才推送提醒
 #
-# 客观限制：GLaDOS 2026-11 起启用 Cloudflare Turnstile，云端机房 IP 目前
-# 生成不了验证 token，签到会返回 code:5。因此早班签到步骤设为静默
-# （NOTIFY 置空 + continue-on-error），不会天天推假报警、也不会让 Actions 变红。
-# 一旦 GLaDOS 放宽策略或配置了 TURNSTILE_TOKEN，云端立刻能自己签上。
+# 客观限制：GLaDOS 2026-11 起启用 Cloudflare Turnstile（生产 sitekey
+# 0x4AAAAAAFF5pkT0bg7fX7nw，action=checkin，cData 绑定 nonce，token 无法复用）。
+# 2026-11-14 在托管 runner 上做了 3 轮实测：
+#   - 有界面 Chrome 157 + xvfb + webdriver=false，challenge 200 正常下发
+#   - challenge-platform 随机子域只有 AAAA(IPv6) 记录，runner 无 IPv6 → NXDOMAIN
+#   - 加 --host-resolver-rules 强制 IPv4 后 DNS 全通，但 CF 的 pat 端点返回 401，
+#     Turnstile 组件不渲染、tokenLen 恒为 0
+#   - 结论：CF 拒绝数据中心 IP，不是 DNS/浏览器标记/代码问题，纯托管 runner 修不了
+# 因此早班签到步骤设为静默（NOTIFY 置空 + continue-on-error），不会天天推假报警。
+# 真签到由本机直连真实 Chrome 完成；若要线上自主签到需改用 self-hosted runner。
 #
 # monitor.js 只认积分流水里的硬证据：detail == 今天(Asia/Shanghai) 且
 # business == system:checkin，不依赖页面文字，也不关心是哪一端签的。

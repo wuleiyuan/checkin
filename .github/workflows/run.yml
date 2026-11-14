@@ -3,10 +3,15 @@ name: run
 # 角色：线上为主通道，每天定时常开；用户 Mac 本地的真实 Chrome 方案作为保底。
 #
 # 班次（北京时间）：
-#   08:00 云端签到（UTC 00:00）—— 先由线上尝试签到，失败静默不报警
+#   08:17 云端签到（UTC 00:17）—— 先由线上尝试签到，预期内拦截记为「跳过」
 #   08:45 本地保底签到（Mac 真实 Chrome，云端过不了 Turnstile 时兜住）
 #   21:45 本地补跑（脚本幂等，已签到自动跳过）
-#   22:00 云端巡检（UTC 14:00）—— 核对当天是否签到成功，漏签才推送提醒
+#   22:23 云端巡检（UTC 14:23）—— 核对当天是否签到成功，漏签才推送提醒
+#
+# 刻意避开整点：GitHub 在 UTC 整点调度负载最高，scheduled run 常被延迟甚至
+# 直接跳过（2026-11-14 两个整点班次全都没触发）。挪到 :17 / :23 提高命中率。
+# ⚠️ 改 cron 必须同步改下面两个 if 里的 github.event.schedule 字符串，
+#    否则两个步骤的 if 都不成立，job 显示绿灯但什么都不跑。
 #
 # 客观限制：GLaDOS 2026-11 起启用 Cloudflare Turnstile（生产 sitekey
 # 0x4AAAAAAFF5pkT0bg7fX7nw，action=checkin，cData 绑定 nonce，token 无法复用）。
@@ -36,10 +41,10 @@ on:
           - checkin
           - monitor
   schedule:
-    # UTC 00:00 = 北京 08:00：线上先跑签到
-    - cron: '0 0 * * *'
-    # UTC 14:00 = 北京 22:00：本地两班之后做兜底复核
-    - cron: '0 14 * * *'
+    # UTC 00:17 = 北京 08:17：线上先跑签到（避开整点调度高峰）
+    - cron: '17 0 * * *'
+    # UTC 14:23 = 北京 22:23：本地两班之后做兜底复核
+    - cron: '23 14 * * *'
 
 permissions:
   contents: read
@@ -59,7 +64,7 @@ jobs:
       # 其它非预期故障照常让 Actions 变红，不掩盖问题。
       - name: 云端签到（主通道）
         if: >-
-          ${{ (github.event_name == 'schedule' && github.event.schedule == '0 0 * * *') ||
+          ${{ (github.event_name == 'schedule' && github.event.schedule == '17 0 * * *') ||
               (github.event_name == 'workflow_dispatch' && (inputs.mode == 'auto' || inputs.mode == 'checkin' || inputs.mode == '')) }}
         run: npm run main
         env:
@@ -75,7 +80,7 @@ jobs:
       # 复核：已签到静默绿灯；真漏签 / Cookie 失效才推送提醒
       - name: 兜底巡检
         if: >-
-          ${{ (github.event_name == 'schedule' && github.event.schedule == '0 14 * * *') ||
+          ${{ (github.event_name == 'schedule' && github.event.schedule == '23 14 * * *') ||
               (github.event_name == 'workflow_dispatch' && (inputs.mode == 'auto' || inputs.mode == 'monitor' || inputs.mode == '')) }}
         run: npm run monitor
         env:

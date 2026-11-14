@@ -1,34 +1,44 @@
 /**
  * GLaDOS 自动签到
  *
- * 判定原则：GLaDOS 接口在 Cookie 失效/未授权时**依然返回 HTTP 200**，
- * 响应体为 {"code":-2,"message":"没有权限"}。因此绝不能靠 HTTP 状态码
- * 或「有没有抛异常」判断成败，只能看响应体里的 code。
+ * 判定原则（2026-11-14 修订）：
+ *   只有 code === 0（签到成功）或 code === 1（今日已签到）算成功。
+ *   其它任何 code 一律失败、Actions 变红。绝不因为「账号认证正常」就判成功——
+ *   那会造成「提示成功但实际没签到」的假绿灯。
  *
  * 已观察到的 code：
  *   0   - 签到成功
- *   1   - 今日已签到（重复执行，GLaDOS 拒绝加分）
+ *   1   - 今日已签到
  *   -2  - 没有权限（Cookie 不完整或失效）
- *   其它 - 未定义，统一视为失败但保留详情
+ *   5   - Cloudflare Turnstile 人机验证未通过（reason: turnstile，retryable: true）
+ *   其它 - 未知，一律失败并保留详情
  *
  * Cookie 要求（2026-10-30 实测）：
  *   必须包含全部四枚：koa:sess、koa:sess.sig、gld:sess、gld:sess.sig。
- *   GLaDOS 新增了 gld:sess 校验，只带 koa 两枚会返回 code:-2「没有权限」，
- *   极易被误判为「Cookie 已失效」。
+ *
+ * 2026-11 起 GLaDOS 签到前置流程（逆向自官方前端 JS）：
+ *   1) GET  /api/user/checkin/challenge -> { nonce, ttl, turnstile: sitekey }
+ *   2) proof = SHA-256(nonce + '.glados-observe-v1') 的 hex
+ *   3) 浏览器渲染 Cloudflare Turnstile 组件拿到 token
+ *   4) POST /api/user/checkin  { nonce, proof, tsState, turnstile }
+ *   本脚本能完成 1、2、4，但无法在 CI 里生成第 3 步的 token。
+ *   若服务端返回 code:5，说明人机验证未过 —— 必须去浏览器手动点一次 Checkin。
+ *   可选：通过 Secret TURNSTILE_TOKEN 注入浏览器里拿到的实时 token（有效期很短）。
  *
  * 鲁棒性：
- *   - 双域名轮询（glados.rocks 主，glados.network 备），单域名 5xx 自动切换
- *   - 每个 fetch 带 3 次指数退避重试（应对 Actions runner 偶发瞬时网络抖动）
- *   - fetch 自带 timeout，避免被卡死
- *   - status 查询失败不影响主判定
+ *   - 双域名轮询（glados.rocks 主，glados.network 备）
+ *   - code:5 / retryable 时换全新 nonce 重试 3 次
+ *   - 每个 fetch 带 timeout + 指数退避
  */
+
+import crypto from 'node:crypto'
 
 const GLADOS_DOMAINS = ['https://glados.rocks', 'https://glados.network']
 const UA =
   'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36'
 const TIMEOUT_MS = 15000
+const REPO_URL = `${process.env.GITHUB_SERVER_URL || 'https://github.com'}/${process.env.GITHUB_REPOSITORY || 'wuleiyuan/checkin'}`
 
-// 带超时的 fetch
 const fetchWithTimeout = async (url, options, timeoutMs) => {
   const ctl = new AbortController()
   const tid = setTimeout(() => ctl.abort(), timeoutMs)
@@ -39,7 +49,6 @@ const fetchWithTimeout = async (url, options, timeoutMs) => {
   }
 }
 
-// 单次请求解析 JSON
 const parseJson = async (res) => {
   const text = await res.text()
   try {
@@ -49,7 +58,6 @@ const parseJson = async (res) => {
   }
 }
 
-// 带 3 次指数退避 + 双域名轮询的请求
 const request = async (path, options) => {
   let lastErr
   for (const domain of GLADOS_DOMAINS) {
@@ -65,23 +73,30 @@ const request = async (path, options) => {
         return await parseJson(res)
       } catch (e) {
         lastErr = e
-        if (i < 2) {
-          await new Promise((r) => setTimeout(r, 1000 * Math.pow(2, i)))
-        }
+        if (i < 2) await new Promise((r) => setTimeout(r, 1000 * Math.pow(2, i)))
       }
     }
-    // 当前域名 3 次都失败，换下一个域名
   }
   throw lastErr
 }
 
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
+
 const glados = async () => {
   const cookie = process.env.GLADOS
   if (!cookie) {
+    return { ok: false, title: '签到失败 ❌ 未配置 Cookie', lines: ['Secret GLADOS 为空，请在仓库 Settings → Secrets 中添加', `<${REPO_URL}>`] }
+  }
+  if (!/gld:sess=/.test(cookie)) {
     return {
       ok: false,
-      title: '签到失败 ❌ 未配置 Cookie',
-      lines: ['Secret GLADOS 为空，请在仓库 Settings → Secrets 中添加'],
+      title: '签到失败 ❌ Cookie 不完整',
+      lines: [
+        'Secret GLADOS 里没有 gld:sess。',
+        'GLaDOS 要求四枚 Cookie 全带：koa:sess、koa:sess.sig、gld:sess、gld:sess.sig。',
+        '请重新登录 glados.rocks，从 DevTools → Application → Cookies 复制全部四枚，更新 Secret GLADOS。',
+        `<${REPO_URL}>`,
+      ],
     }
   }
 
@@ -92,38 +107,49 @@ const glados = async () => {
     'user-agent': UA,
   }
 
-  // 前置校验：缺 gld:sess 必然 code:-2，直接给出明确修复提示
-  if (!/gld:sess=/.test(cookie)) {
-    return {
-      ok: false,
-      title: '签到失败 ❌ Cookie 不完整',
-      lines: [
-        'Secret GLADOS 里没有 gld:sess。',
-        'GLaDOS 现在要求四枚 Cookie 全带：koa:sess、koa:sess.sig、gld:sess、gld:sess.sig，缺 gld:sess 会报 code:-2「没有权限」。',
-        '请重新登录 glados.rocks，从浏览器 DevTools → Application → Cookies 复制全部四枚，更新 Secret GLADOS。',
-        `<${process.env.GITHUB_SERVER_URL}/${process.env.GITHUB_REPOSITORY}>`,
-      ],
+  const statusOnce = async () => {
+    try {
+      const status = await request('/api/user/status', { method: 'GET', headers })
+      const d = Number(status?.data?.leftDays)
+      return Number.isFinite(d) ? `${d.toFixed(2)} 天` : '获取失败'
+    } catch {
+      return '获取失败'
     }
   }
 
   try {
-    const checkin = await request('/api/user/checkin', {
-      method: 'POST',
-      headers: { ...headers, 'content-type': 'application/json' },
-      body: JSON.stringify({ refCode: 'user-center' }),
-    })
-
-    let leftText = '获取失败（一般来说意味着 Cookie 已失效）'
-    try {
-      const status = await request('/api/user/status', { method: 'GET', headers })
-      const leftDays = status?.data?.leftDays
-      if (leftDays !== undefined && leftDays !== null && !Number.isNaN(Number(leftDays))) {
-        leftText = `${Number(leftDays).toFixed(2)} 天`
+    let checkin = null
+    const attempts = 3
+    for (let i = 0; i < attempts; i++) {
+      // 每轮换全新 nonce，避免复用过期 challenge
+      let nonce = ''
+      try {
+        const ch = await request('/api/user/checkin/challenge', { method: 'GET', headers })
+        nonce = ch?.code === 0 && ch.nonce ? ch.nonce : ''
+      } catch {
+        nonce = ''
       }
-    } catch (e) {
-      // status 失败不阻塞主判定
+      const proof = nonce ? crypto.createHash('sha256').update(`${nonce}.glados-observe-v1`).digest('hex') : ''
+      const token = process.env.TURNSTILE_TOKEN || ''
+      const body = nonce
+        ? { nonce, proof, tsState: token ? 'ok' : 'unavailable', ...(token ? { turnstile: token } : {}) }
+        : { refCode: 'user-center' }
+
+      checkin = await request('/api/user/checkin', {
+        method: 'POST',
+        headers: { ...headers, 'content-type': 'application/json' },
+        body: JSON.stringify(body),
+      })
+
+      if (checkin?.code === 0 || checkin?.code === 1) break
+      if (i < attempts - 1 && (checkin?.retryable || checkin?.code === 5)) {
+        await sleep(3000 * (i + 1))
+        continue
+      }
+      break
     }
 
+    const leftText = await statusOnce()
     const code = checkin?.code
     const message = checkin?.message ?? '接口未返回 message'
     let ok = false
@@ -133,32 +159,31 @@ const glados = async () => {
     if (code === 0) {
       ok = true
       title = '签到成功 ✅'
-    } else if (code === 1 || /repeat|already|已签/i.test(message)) {
+    } else if (code === 1) {
       ok = true
       title = '今日已签到（重复执行）'
+    } else if (code === 5 || checkin?.reason === 'turnstile') {
+      title = '签到失败 ❌ 需要 Cloudflare 人机验证'
+      hint =
+        'GLaDOS 已启用 Turnstile，CI 纯 API 无法生成验证 token。请手动打开 https://glados.rocks/console/checkin 点击 Checkin（一天一次，10 秒）'
     } else if (code === -2 || /没有权限|未登录|失效|过期|token|login/i.test(message)) {
       title = '签到失败 ❌ Cookie 已失效'
       hint =
-        '若 Secret 已含四枚 Cookie 仍报此错，说明服务端会话已轮换：请重新登录 glados.rocks 抓取四枚 Cookie（koa:sess、koa:sess.sig、gld:sess、gld:sess.sig），更新 Secret GLADOS'
+        '请重新登录 glados.rocks 抓取四枚 Cookie（koa:sess、koa:sess.sig、gld:sess、gld:sess.sig），更新 Secret GLADOS'
     } else {
-      const looksAuthOk = /\d+\.\d+\s*天/.test(leftText)
-      if (looksAuthOk) {
-        ok = true
-        title = `今日已签到（接口 code=${code}，但账号认证正常）`
-      } else {
-        title = `签到失败 ❌ (code=${code})`
-        hint = '请查看下方原始返回，或手动登录控制台确认账号状态'
-      }
+      title = `签到失败 ❌ (code=${code})`
+      hint = '请查看原始返回，或手动登录控制台确认账号状态'
     }
 
     const lines = [
       `结果：${title}`,
       `接口 code：${code}`,
+      `失败原因：${checkin?.reason ?? '无'}`,
       `接口信息：${message}`,
       `剩余天数：${leftText}`,
       hint ? `处理建议：${hint}` : '',
       `原始返回：${JSON.stringify(checkin)}`,
-      `<${process.env.GITHUB_SERVER_URL}/${process.env.GITHUB_REPOSITORY}>`,
+      `<${REPO_URL}>`,
     ].filter(Boolean)
 
     return { ok, title, lines }
@@ -169,7 +194,7 @@ const glados = async () => {
       lines: [
         `错误：${error.message || error}`,
         '可能原因：网络被拦截、Cloudflare 挑战、Cookie 含多余空格或换行',
-        `<${process.env.GITHUB_SERVER_URL}/${process.env.GITHUB_REPOSITORY}>`,
+        `<${REPO_URL}>`,
       ],
     }
   }
@@ -181,12 +206,7 @@ const notify = async (title, lines) => {
   await fetch('https://www.pushplus.plus/send', {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({
-      token,
-      title,
-      content: lines.join('<br>'),
-      template: 'markdown',
-    }),
+    body: JSON.stringify({ token, title, content: lines.join('<br>'), template: 'markdown' }),
   })
 }
 
@@ -195,7 +215,7 @@ const main = async () => {
   console.log(result.title)
   result.lines.forEach((line) => console.log(line))
   await notify(result.title, result.lines)
-  // 失败时让 Actions 变红，避免「绿灯假象」
+  // 失败时让 Actions 变红，杜绝「绿灯假象」
   if (!result.ok) process.exitCode = 1
 }
 

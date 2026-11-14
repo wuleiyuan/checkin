@@ -30,6 +30,10 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
       '--no-sandbox',
       '--disable-dev-shm-usage',
       '--disable-blink-features=AutomationControlled',
+      // Cloudflare 的 challenge-platform 随机子域只有 AAAA(IPv6) 记录，
+      // GitHub 托管 runner 无 IPv6 出站 → ERR_NAME_NOT_RESOLVED。
+      // 强制把整个 challenges.cloudflare.com 域映射到主域的 IPv4 边缘。
+      '--host-resolver-rules=MAP *.challenges.cloudflare.com 104.18.95.41',
     ],
   })
   const ctx = await browser.newContext({

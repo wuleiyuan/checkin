@@ -1,0 +1,33 @@
+name: probe-turnstile
+# 一次性实验：验证 GitHub 托管 runner 里的真浏览器能否求解 Cloudflare Turnstile。
+# 结论出来后本文件会删除或固化进主流程。
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: 环境预检
+        run: |
+          echo "=== Chrome ==="
+          (which google-chrome && google-chrome --version) || (which chromium && chromium --version) || echo "无预装 Chrome"
+          echo "=== xvfb ==="
+          which xvfb-run || (sudo apt-get update -qq && sudo apt-get install -y xvfb)
+          echo "=== Cloudflare 组件可达性 ==="
+          curl -s --max-time 15 -o /dev/null -w "turnstile api.js -> HTTP %{http_code}\n" https://challenges.cloudflare.com/turnstile/v0/api.js
+          curl -s --max-time 15 -o /dev/null -w "glados.rocks -> HTTP %{http_code}\n" https://glados.rocks/
+      - run: npm i playwright-core --no-audit --no-fund
+      - name: 真浏览器求解 Turnstile
+        run: xvfb-run -a node probe.js
+        env:
+          GLADOS: ${{ secrets.GLADOS }}

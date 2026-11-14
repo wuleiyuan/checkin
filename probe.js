@@ -50,7 +50,11 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
     }
   })
   let apiResp = null
+  const cfStatus = new Set()
   page.on('response', async (r) => {
+    if (/challenges\.cloudflare\.com/i.test(r.url())) {
+      cfStatus.add(`${r.status()} ${new URL(r.url()).pathname.slice(0, 60)}`)
+    }
     if (r.url().includes('/api/user/checkin') && !r.url().includes('challenge')) {
       try { apiResp = (await r.text()).slice(0, 400) } catch {}
     }
@@ -60,6 +64,26 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
     waitUntil: 'domcontentloaded',
     timeout: 60000,
   })
+  await sleep(6000)
+
+  // 诊断 1：服务端有没有下发 challenge / sitekey
+  const ch = await page.evaluate(async () => {
+    try {
+      const r = await fetch('/api/user/checkin/challenge', { credentials: 'include' })
+      return { status: r.status, body: (await r.text()).slice(0, 300) }
+    } catch (e) { return { error: String(e) } }
+  })
+  console.log('[CHALLENGE]', JSON.stringify(ch))
+
+  // 诊断 2：Turnstile 组件 / iframe / 输入框状态
+  const widget = await page.evaluate(() => ({
+    hasTurnstileApi: typeof window.turnstile !== 'undefined',
+    iframes: [...document.querySelectorAll('iframe')].map((f) => f.src.slice(0, 90)),
+    inputs: [...document.querySelectorAll('input')].map((i) => i.name).filter(Boolean),
+    tsBoxes: document.querySelectorAll('[id*="turnstile"], [class*="turnstile"], [data-turnstile]').length,
+  }))
+  console.log('[WIDGET]', JSON.stringify(widget))
+  console.log('[CF_RESP]', JSON.stringify([...cfStatus].slice(0, 12)))
 
   let tokenLen = 0
   for (let i = 0; i < 12; i++) {

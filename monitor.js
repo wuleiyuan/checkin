@@ -21,6 +21,11 @@
  * detail 是 Asia/Shanghai 日期字符串（如 "2026-11-14"），
  * business 是 "system:checkin"。不用页面文字，也不用猜测。
  *
+ * ⚠️ 口径边界（2026-11-16 修正）：流水只能证明「账号那天签到了」，
+ * 不能证明「是自动签到程序签的」。用户手动补签同样会留下这条流水。
+ * 云端巡检的职责仅是「账号别漏签」，不宣称自动签到程序正常；
+ * 自动签到是否真的成功，以本机 state.json 的 lastAutoDate 为准。
+ *
  * MONITOR_NOW 仅用于本地测试注入时间，线上不设置。
  */
 
@@ -166,9 +171,11 @@ const main = async () => {
   const hit = history.find((x) => x.detail === targetDate && /checkin/i.test(x.business || ''))
 
   if (hit) {
-    // 静默绿灯：本地自动签到已干活，不推送任何消息
-    console.log(`${targetDate} 已签到 ✅ +${hit.change} 分，余额 ${hit.balance}（静默）`)
+    // 静默绿灯：账号该日没漏签，不推送任何消息。
+    // 注意：不宣称「自动签到成功」——人工补签也会产生同样的流水记录。
+    console.log(`${targetDate} 账号已签到 ✅ +${hit.change} 分，余额 ${hit.balance}（静默）`)
     console.log(`积分：${points.points} | 连续：${points.streak ?? '?'} 天`)
+    console.log('说明：流水无法区分签到来源，自动签到是否成功以本机 state.json / lastAutoDate 为准')
     return
   }
 

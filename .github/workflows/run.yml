@@ -25,8 +25,11 @@ name: run
 # NOTIFY 置空不推假报警；其它真实故障（Cookie 失效 / 网络异常）仍会让 Actions 变红。
 # 真签到由本机直连真实 Chrome 完成；若要线上自主签到需改用 self-hosted runner。
 #
-# monitor.js 只认积分流水里的硬证据：detail == 今天(Asia/Shanghai) 且
+# monitor.js 只认积分流水里的硬证据：detail == 目标日(Asia/Shanghai) 且
 # business == system:checkin，不依赖页面文字，也不关心是哪一端签的。
+# ⚠️ 流水只能证明「账号没漏签」，不能证明「自动签到程序成功」——用户手动
+# 补签会留下完全相同的记录。自动签到健康度以本机 state.json 的 lastAutoDate
+# 为准；云端巡检不宣称程序正常，只负责真漏签时提醒。
 
 on:
   workflow_dispatch:

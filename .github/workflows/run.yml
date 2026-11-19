@@ -1,51 +1,47 @@
 name: run
 
-# 角色：线上为主通道，每天定时常开；用户 Mac 本地的真实 Chrome 方案作为保底。
+# 2026-11-19 修订：定时签到班次已移除，GitHub 侧只负责巡检 + 告警 + 手动诊断。
 #
-# 班次（北京时间）：
-#   08:17 云端签到（UTC 00:17）—— 先由线上尝试签到，预期内拦截记为「跳过」
-#   08:45 本地保底签到（Mac 真实 Chrome，云端过不了 Turnstile 时兜住）
-#   21:45 本地补跑（脚本幂等，已签到自动跳过）
-#   22:23 云端巡检（UTC 14:23）—— 核对当天是否签到成功，漏签才推送提醒
+# 为什么删：
+#   GLaDOS 2026-11 起要求 Cloudflare Turnstile token。托管 runner 是数据中心 IP，
+#   CF 的 pat 端点返回 401，Turnstile 组件不渲染，token 恒为 0 → 接口 code:5。
+#   2026-11-14 三轮实测（有界面 Chrome + xvfb、强制 IPv4、webdriver=false 全试过）
+#   与 2026-11-19 复核结论一致：
+#     - sitekey 0x4AAAAAAFF5pkT0bg7fX7nw 未变
+#     - challenge 接口正常下发 nonce / ttl=300s
+#     - proof = SHA256(nonce + ".glados-observe-v1") 服务端仍然接受
+#     - 唯一缺的就是第 3 步 turnstile token，托管 runner 生成不出来
+#   这是 CF 对机房 IP 的策略，不是代码 bug，改代码修不了。
+#   之前每天 08:17 跑一班注定 code:5 的签到，靠 EXPECT_TURNSTILE_BLOCK 记成
+#   「跳过」装绿灯，属于自欺：Actions 绿了，签到并没有发生。现在不再留这个班次。
 #
-# 刻意避开整点：GitHub 在 UTC 整点调度负载最高，scheduled run 常被延迟甚至
-# 直接跳过（2026-11-14 两个整点班次全都没触发）。挪到 :17 / :23 提高命中率。
-# ⚠️ 改 cron 必须同步改下面两个 if 里的 github.event.schedule 字符串，
-#    否则两个步骤的 if 都不成立，job 显示绿灯但什么都不跑。
+# 现在的分工：
+#   真签到  → 本机真实 Chrome（launchd 08:30/09:30/21:30/21:45 + WorkBuddy 自动化）
+#   巡检    → 本仓库 22:23（UTC 14:23）核对积分流水，漏签才推送提醒
+#   诊断    → 手动 workflow_dispatch，能看到真实 code:5 原始返回
 #
-# 客观限制：GLaDOS 2026-11 起启用 Cloudflare Turnstile（生产 sitekey
-# 0x4AAAAAAFF5pkT0bg7fX7nw，action=checkin，cData 绑定 nonce，token 无法复用）。
-# 2026-11-14 在托管 runner 上做了 3 轮实测：
-#   - 有界面 Chrome 157 + xvfb + webdriver=false，challenge 200 正常下发
-#   - challenge-platform 随机子域只有 AAAA(IPv6) 记录，runner 无 IPv6 → NXDOMAIN
-#   - 加 --host-resolver-rules 强制 IPv4 后 DNS 全通，但 CF 的 pat 端点返回 401，
-#     Turnstile 组件不渲染、tokenLen 恒为 0
-#   - 结论：CF 拒绝数据中心 IP，不是 DNS/浏览器标记/代码问题，纯托管 runner 修不了
-# 因此早班用 EXPECT_TURNSTILE_BLOCK=1 把 code:5 记为「跳过」并保持绿灯，
-# NOTIFY 置空不推假报警；其它真实故障（Cookie 失效 / 网络异常）仍会让 Actions 变红。
-# 真签到由本机直连真实 Chrome 完成；若要线上自主签到需改用 self-hosted runner。
+# 想让 GitHub 真正自主签到，唯一路径是 self-hosted runner（家宽住宅 IP + 真实 Chrome）：
+#   1. 在常开设备上装 actions runner（不要用会睡眠的 Mac），label 加 glados
+#   2. 把下面 runs-on 改为 [self-hosted, glados]
+#   3. schedule 里加回 '17 0 * * *'
 #
 # monitor.js 只认积分流水里的硬证据：detail == 目标日(Asia/Shanghai) 且
 # business == system:checkin，不依赖页面文字，也不关心是哪一端签的。
-# ⚠️ 流水只能证明「账号没漏签」，不能证明「自动签到程序成功」——用户手动
-# 补签会留下完全相同的记录。自动签到健康度以本机 state.json 的 lastAutoDate
-# 为准；云端巡检不宣称程序正常，只负责真漏签时提醒。
+# 流水只能证明「账号没漏签」，不能证明「自动签到程序成功」——人工补签留的
+# 记录完全一样。自动签到健康度以本机 state.json 的 lastAutoDate 为准。
 
 on:
   workflow_dispatch:
     inputs:
       mode:
-        description: 'auto=云端签到+巡检(默认)；checkin=只跑云端签到；monitor=只巡检'
+        description: 'checkin=只跑云端签到诊断(会看到真实 code:5)；其它=只巡检'
         required: false
-        default: 'auto'
+        default: 'monitor'
         type: choice
         options:
-          - auto
-          - checkin
           - monitor
+          - checkin
   schedule:
-    # UTC 00:17 = 北京 08:17：线上先跑签到（避开整点调度高峰）
-    - cron: '17 0 * * *'
     # UTC 14:23 = 北京 22:23：本地两班之后做兜底复核
     - cron: '23 14 * * *'
 
@@ -63,28 +59,19 @@ jobs:
           node-version: 20
       - run: npm ci
 
-      # 主通道：线上尝试签到。预期内的 CF 拦截记为跳过并绿灯；
-      # 其它非预期故障照常让 Actions 变红，不掩盖问题。
-      - name: 云端签到（主通道）
-        if: >-
-          ${{ (github.event_name == 'schedule' && github.event.schedule == '17 0 * * *') ||
-              (github.event_name == 'workflow_dispatch' && (inputs.mode == 'auto' || inputs.mode == 'checkin' || inputs.mode == '')) }}
+      # 只保留手动诊断入口。不设 EXPECT_TURNSTILE_BLOCK，失败就红，
+      # 让人看到真实的 code:5，而不是被包装成「跳过」。
+      - name: 云端签到（仅手动诊断）
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.mode == 'checkin' }}
         run: npm run main
         env:
           GLADOS: ${{ secrets.GLADOS }}
           TURNSTILE_TOKEN: ${{ secrets.TURNSTILE_TOKEN }}
-          # 覆盖 Secret：云端签到失败不推假报警，只有巡检发现真漏签才推
           NOTIFY: ''
-          # 仅自动定时启用：机房 IP 被 CF 拦截是预期内策略限制，
-          # 记为「跳过」并保持绿灯，不再留下吓人的失败标记。
-          # 手动 workflow_dispatch 不设此变量，仍能看到真实 code:5 诊断结果。
-          EXPECT_TURNSTILE_BLOCK: ${{ github.event_name == 'schedule' && '1' || '' }}
 
       # 复核：已签到静默绿灯；真漏签 / Cookie 失效才推送提醒
       - name: 兜底巡检
-        if: >-
-          ${{ (github.event_name == 'schedule' && github.event.schedule == '23 14 * * *') ||
-              (github.event_name == 'workflow_dispatch' && (inputs.mode == 'auto' || inputs.mode == 'monitor' || inputs.mode == '')) }}
+        if: ${{ (github.event_name == 'schedule' && github.event.schedule == '23 14 * * *') || (github.event_name == 'workflow_dispatch' && inputs.mode != 'checkin') }}
         run: npm run monitor
         env:
           GLADOS: ${{ secrets.GLADOS }}
